@@ -1,0 +1,306 @@
+
+val rdd = sc.textFile("book-ratings/BX-Books.csv").map(x => x.replaceAll("\"","")).map( x => x.split(";"))
+
+val isbn_idx = rdd.map( x => x(0)).distinct.zipWithIndex
+
+val book_data = rdd.map( x => (x(0),x)).join(isbn_idx)
+
+val rdd1 = sc.textFile("book-ratings/BX-Book-Ratings.csv").map(x => x.replaceAll("\"","")).map( x => x.split(";"))
+
+val book_ratings = rdd1.map( x => (x(1),x)).join(isbn_idx)
+
+
+import org.apache.spark.mllib.recommendation.Rating
+val ratings = book_ratings.map( x => Rating(x._2._1(0).toInt,x._2._2.toInt,x._2._1(2).toDouble))
+
+import org.apache.spark.mllib.recommendation.ALS
+val model = ALS.train(ratings, 50, 10, 0.01)
+
+
+import org.apache.spark.mllib.linalg.Vectors
+val bookFactors = model.productFeatures.map { case (id, factor) => (id, Vectors.dense(factor)) }
+val bookVectors = bookFactors.map(_._2)
+
+val userFactors = model.userFeatures.map { case (id, factor) => (id, Vectors.dense(factor)) }
+val userVectors = userFactors.map(_._2)
+
+
+import org.apache.spark.mllib.linalg.distributed.RowMatrix
+
+val bookMatrix = new RowMatrix(bookVectors)
+val bookMatrixSummary = bookMatrix.computeColumnSummaryStatistics()
+val userMatrix = new RowMatrix(userVectors)
+val userMatrixSummary = userMatrix.computeColumnSummaryStatistics()
+
+println("Book factors mean: " + bookMatrixSummary.mean)
+println("Book factors variance: " + bookMatrixSummary.variance)
+println("User factors mean: " + userMatrixSummary.mean)
+println("User factors variance: " + userMatrixSummary.variance)
+
+------- Train a Kmeans to group possible categories of books -------------------
+
+import org.apache.spark.mllib.clustering.KMeans
+val numClusters = 10
+val numIterations = 10
+val numRuns = 3
+
+val bookClusterModel = KMeans.train(bookVectors, numClusters, numIterations, numRuns)
+
+---- function to calculate Euclidian distance ----------------------------------
+
+import breeze.linalg._
+import breeze.numerics.pow
+def computeDistance(v1: DenseVector[Double], v2: DenseVector[Double]) = pow(v1 - v2, 2).sum
+
+val book_data2 = book_data.map(x => (x._2._2.toInt,(x._2._1(1),x._2._1(2),(x._2._1(3)))))
+
+val titlesWithFactors = book_data2.join(bookFactors)
+
+val booksAssigned = titlesWithFactors.map { case (id, ((title, author, year), vector)) =>
+ val pred = bookClusterModel.predict(vector)
+ val clusterCentre = bookClusterModel.clusterCenters(pred)
+ val dist = computeDistance(DenseVector(clusterCentre.toArray), DenseVector(vector.toArray))
+ (id, title, author, year, pred, dist)
+}
+
+val clusterAssignments = booksAssigned.groupBy { case (id, title, author, year, cluster, dist) => cluster }.collectAsMap
+
+
+for ( (k, v) <- clusterAssignments.toSeq.sortBy(_._1)) {
+ println(s"Cluster $k:")
+ val m = v.toSeq.sortBy(_._6)
+ println(m.take(20).map { case (_, title, author, year, _, d) =>
+ (title, author, year, d) }.mkString("\n"))
+ println("=====\n")
+}
+
+
+Cluster 0:
+(Whoo?,Richard Hoyt,2000,0.006219818701725781)
+(Age of Stonehenge,Colin Burgess,2003,0.006219818701725781)
+(Shots from the Hip: Another Way of Looking Through the Camera,Alias Johnny Stiletto,1993,0.006219818701725781)
+(Visible Worlds,Marilyn Bowering,1999,0.006219818701725781)
+(BLOOD VENGEANCE (War World),S.M. Stirling,1994,0.006219818701725781)
+(The Other Shepards,Adele Griffin,1999,0.006219818701725781)
+(Momentum, Direction, and Divergence,William  Blau,1995,0.006219818701725781)
+(Elsa,Doug  Lynn,2004,0.006219818701725781)
+(The Thoughts of an Emigrant,Albert Schwarzenbach,2004,0.006219818701725781)
+(Englische Kurzgesschichten,Aldous Huxley,1995,0.006219818701725781)
+(Una duda razonable = A Sudden, Fearful Death,Anne Perry,2002,0.006219818701725781)
+(WITSEC: Inside the Federal Witness Protection Program,PETE EARLEY,2002,0.006219818701725781)
+(To Dance With Angels: An Amazing Journey to the Heart With the Phenomenal Thomas Jacobson and the Grand Spirit, \ Dr. Peebles\,Don Pendleton,1990,0.006219818701725781)
+(Overcoming Shyness: Meeting People Is Fun,Phyllis Shaw,1984,0.006219818701725781)
+(Ester Ried's Awakening (The Alden collection),Isabella MacDonald Alden,1992,0.006219818701725781)
+(The Wolfen,Whitley Strieber,1988,0.006219818701725781)
+(Discoflash im Ambiente von Drogen, Gewalt + Banane,Joachim Malchau,1991,0.006219818701725781)
+(Catacombs (Moving Fiction),Paul McCusker,1997,0.006219818701725781)
+(Was geschah wirklich mit Dulce Veiga?,Caio Fernando Abreu,1997,0.006219818701725781)
+(Four Month Friend,Susan Clymer,1991,0.006219818701725781)
+=====
+
+Cluster 1:
+(Flowers for Mama (Zebra Regency Romance),Mona Gedney,2002,2.709412973169094)
+(Cat call,Louise Lawrence,1980,3.772336985133358)
+(Haunted Halloween (Walt Disney's Mickey and Friends),Diane Muldrow,1998,3.772336985133358)
+(The Western Experience: Since the Sixteenth Century,Mortimer Chambers,1998,3.869200422872861)
+(The Western Experience: To the Eighteenth Century,Mortimer Chambers,1994,3.869200422872861)
+(West of Venus,Judy Troy,1997,3.8901906354770905)
+(Monsters from the Id (Brainstorm),Anthony L Abraham,1996,3.981198083427986)
+(A Victorian Rose,Catherine Palmer,2002,4.131012885498644)
+(Caroline's Daughters,Alice Adams,1993,4.169636613631385)
+(Big Footprints,Hammond Innes,1978,4.211284974922664)
+(Consumer Reports Best Travel Deals 2001: Tips and Strategies for Smart Travel,Consumer Reports,2001,4.602176786676375)
+(Cyber Invasion,Dale Tibbils,2001,4.792316171201651)
+(Once upon a Time,Constance O'Banyon,1996,4.82759742665054)
+(Understanding Statistics in the Behavioral Sciences,Robert R. Pagano,1998,4.831907628130421)
+(Come Together,Josie Lloyd,1999,4.831907628130421)
+(Statistics for the Behavioral and Social Sciences: A Brief Course,Arthur Aron,1996,4.831907628130421)
+(Christmas Fantasy (Harlequin Temptation, No. 759),Janelle Denison,1999,4.857190143625651)
+(Fuzzy Duckling,Not Applicable (Na ),2000,4.862427683322331)
+(The Media and Mental Distress,Glasgow Media Group,1997,4.898771294752844)
+(Not Without Risk (Silhouette Intimate Moments, No 647),Suzanne Brockmann,1995,4.931811148567117)
+=====
+
+Cluster 2:
+(Just Between Friends: Women Sharing and Learning Together,Terry Anne Meeuwsen,1999,0.8190694614705498)
+(Sins,Judith Gould,1993,0.8478424843886274)
+(A Blessing on the Moon,Joseph Skibell,1997,0.8853899020100361)
+(Peacekeepers,Dianne Linden,2004,0.8937081913960963)
+(Crossing the Paradise Line,Annabel Giles,2003,0.9116845629973866)
+(Dilbert and the Way of the Weasel : A Guide to Outwitting Your Boss, Your Coworkers, and the Other Pants-Wearing Ferrets in Your Life,Scott Adams,2003,0.9218309848758157)
+(The magic carpet's secret (Disney's Aladdin series),Joanne Barkan,1993,0.9357040713117133)
+(La piel dura,Andrea Blanqué,1999,0.9585300723521004)
+(Brigham's Day,John Gates,2000,0.9626558115245375)
+(The Rough Guide to Venice and the Vento (Rough Guide Venice),Johathan Buckley,2001,0.9645216909402028)
+(The Sea Came in at Midnight,Steve Erickson,1999,0.9668783085193997)
+(Fine Art of Literary Mayhem: A Lively Account of Famous Writers and Their Feuds,Myrick Land,1983,0.982658642089626)
+(Clippings from My Notebook,Corrie Ten Boom,1982,0.9928028460891297)
+(The Bronze King (The Sorcery Hall Trilogy, Book 1),Suzy McKee Charnas,2001,0.9980726684903733)
+(Call of the Wild (Penguin Popular Classics),Jack London,0,1.0004918438576207)
+(Hoffmans Hunger.,Leon de Winter,1995,1.0026782028184476)
+(The World in Winter,John Christopher,1982,1.0045086280909226)
+(Angels: Knowing Their Purpose, Releasing Their Power,Charles Capps,2003,1.0057925003918127)
+(Civil War Days: Everyday Life During the War Between the States,John Bowen,1988,1.0057925003918127)
+(Insider's England,John Timpson,1988,1.0095512055650508)
+=====
+
+Cluster 3:
+(Highlights to Heaven: A Bad Hair Day Mystery (Cohen, Nancy J., Bad Hair Day Mystery.),Nancy J. Cohen,2003,6.054449157044088)
+(Murder on the Marmora : A Mystery,Conrad Allen,2004,6.054449157044088)
+(Untimely Graves : A Mystery Featuring Superintendent Gil Mayo (Gil Mayo Mysteries),Marjorie Eccles,2004,6.054449157044088)
+(The Book of Light,Michelle Blake,2003,6.254130037930069)
+(Fudge Cupcake Murder: A Hannah Swenson Mystery (Hannah Swensen Mysteries (Hardcover)),Joanne Fluke,2004,7.6720825725816395)
+(Midsummer,Marcelle Clements,2003,8.329803616519175)
+(Blackening Song (Ella Clah Novels (Paperback)),Aimee Thurlo,1997,9.142031283098236)
+(Girlfriend, You Are the Best: A Fable for Our Times,Carol Lynn Pearson,2000,9.462104413582935)
+(This Ain't Brain Surgery : How to Win the Pennant Without Losing Your Mind,Larry Dierker,2003,9.642438737730776)
+(The Ticket Out,Helen Knode,2003,9.642438737730776)
+(The Unfinished City: New York and the Metropolitan Idea,Thomas Bender,2002,9.642438737730776)
+(The Once and Future Spy,Robert Littell,1991,9.642438737730776)
+(Death of a Hoosier Schoolmaster: A Novel,Marlis Day,2002,9.642438737730776)
+(Lost in the Cosmos,Walker Percy,1984,9.642438737730776)
+(The Irish Village Murder (Torrey Tunet Mysteries (Hardcover)),Dicey Deere,2004,9.642438737730776)
+(Sharing Sean : A Novel,Frances Pye,2004,9.642438737730776)
+(Before the Cradle Falls,James F. David,2002,9.642438737730776)
+(Flawed Light,Clare Curzon,2003,9.642438737730776)
+(The Gilded Cage,Troy Soos,2002,9.642438737730776)
+(Corporate Messiah: The Hiring and Firing of Million Dollar Managers,Patricia O'Toole,1985,9.642438737730776)
+=====
+
+Cluster 4:
+(Shadow Divers : The True Adventure of Two Americans Who Risked Everything to Solve One of the Last Mysteries of World War II,Robert Kurson,2004,3.6249585755717098)
+(Savage Embers (Savage),Cassie Edwards,1999,3.7687448708272417)
+(Franklin Has a Sleepover (Franklin),Paulette Bourgeois,1996,3.9415671380735557)
+(Ten items or less: A counting book (A Little golden book),Stephanie Calmenson,1985,3.9587710222268084)
+(Elizabeth, Larry, and Ed,Marilyn Sadler,1992,3.9587710222268084)
+(The Great Getty: The Life and Loves of J. Paul Getty--Richest Man in the World,Robert Lenzner,1987,4.413983471482962)
+(For All Time,Parris Afton Bonds,1996,4.903969506815012)
+(The Great Book of Optical Illusions,Gyles Brandreth,1985,5.045248680961612)
+(St. Michael and the Angels:  A Month With St. Michael and the Holy Angels,Compiled from Approved Sources,1983,5.150208687531074)
+(Anne Hooper's Sexual Intimacy: How to Build a Lasting and Loving Relationship,Anne Hooper,1996,5.150208687531074)
+(Cures: A Gay Man's Odyssey,Martin Duberman,1992,5.150208687531074)
+(Sex Secrets: Ways to Satisfy Your Partner Every Time (Men's Health Life Improvement Guides),Brian Chichester,1996,5.150208687531074)
+(Self Analysis,Karen Horney,1968,5.150208687531074)
+(For Love of Mother,Alan Dean Foster,1983,5.16047525617343)
+(Persian Mirrors : The Elusive Face of Iran,Elaine Sciolino,2000,5.262677541919746)
+(Ross Perot: The Man Behind the Myth,Ken Gross,1992,5.361209546547102)
+(On Mermaid Avenue,Binnie Kirshenbaum,1992,5.387692748296527)
+(Men in Black: A Storybook,Jane B. Mason,1997,5.407133020487188)
+(The Dangers of Strangers,Carole G. Vogel,1983,5.407133020487188)
+(ASP 3 Fast &amp, Easy Web Development W/CD,Michael Thomasson,5.407133020487188)
+=====
+
+Cluster 5:
+(A Place in the Woods (Fesler-Lampert Minnesota Heritage Book Series),Helen Hoover,1999,2.215910329854001)
+(The Book of Hours: Prayers to a Lowly God (European Poetry Classics (Paperback)),Rainer Maria Rilke,2001,2.215910329854001)
+(Great Jobs for English Majors,Julie  DeGalan,2000,2.215910329854001)
+(A Christian Perspective on Political Thought,Stephen Charles Mott,1993,2.215910329854001)
+(Revising Prose (4th Edition),Richard Lanham,1999,2.8395660552110393)
+(A Chorus of Stones: The Private Life of War,Susan Griffin,1992,2.8395660552110393)
+(Essentials of International Relations, Second Edition (The Norton Series in World Politics),Karen Mingst,2001,2.8395660552110393)
+(Paul, the Spirit, and the People of God,Gordon D. Fee,1996,2.8395660552110393)
+(Cultures of Color in America,Sybil M. Lassiter,1998,2.8395660552110393)
+(The Global Myths: Exploring Primitive, Pagan, Sacred, and Scientific Mythologies (Meridian S.),Alexander Eliot,1994,2.920435264553463)
+(The Evening News,Arthur Hailey,2001,3.006329192944964)
+(The Eros Comix Library #45:  Submissive Suzanne, Volume 1,Gunther Von Wegen,2001,3.9333639800352747)
+(The Writer's Guide to Character Traits: Includes Profiles of Human Behaviors and Personality Types (Writer's Market Library),Linda N. Edelstein,1999,3.989761474673065)
+(Poem a Day, Vol. 1,KAREN MCCOSKER,1998,4.023714355546198)
+(The Kissing Gate,Pamela Haines,1982,4.025418640097705)
+(The Four Winds of Heaven,Monique High,1980,4.026768283158049)
+(Random House Basic Dictionary of French,Francesca Langbaum,1981,4.034659104881074)
+(The Capricorn Stone,Madeleine Brent,1980,4.034659104881074)
+(All the Colors of the Earth,Sheila Hamanaka,1994,4.034659104881074)
+(Today's witches,Susy Smith,1970,4.034659104881074)
+=====
+
+Cluster 6:
+(The Philosophy of Horror or Paradoxes of the Heart,Noel Carroll,1990,4.056433892889485)
+(Why Big Fierce Animals Are Rare: An Ecologist's Perspective,Paul A. Colinvaux,1979,4.171357830608631)
+(SHADOWS ON THE MIRROR : SHADOWS ON THE MIRROR,Frances Fyfield,1992,4.181633602423691)
+(The New Golden Rule: Community and Morality in a Democratic Society,Amitai Etzioni,1998,4.201265832670408)
+(Sweeney Todd: The Demon Barber of Fleet Street (Applause Musical Library),Stephen Sondheim,1991,4.201265832670408)
+(Making Choices: Reading Issues in Context,Michael E. Cooley,1996,4.201265832670408)
+(Who Will Be in the White House?: Predicting Presidential Elections,Randall J. Jones,2001,4.201265832670408)
+(Salvador,Joan Didion,1994,4.201265832670408)
+(Roe V. Wade: The Abortion Rights Controversy in American History (Landmark Law Cases and American Society),N. E. H. Hull,2001,4.201265832670408)
+(Islamic Art,Barbara Brend,1992,4.201265832670408)
+(The Signifying Monkey: A Theory of African-American Literary Criticism,Henry Louis Gates,1989,4.201265832670408)
+(On Toleration,Michael Walzer,1999,4.201265832670408)
+(American Radicalism (Blackwell Readers in American Social and Cultural History (Paper)),Daniel Pope,2001,4.201265832670408)
+(Turnstile Justice: Issues in American Corrections (2nd Edition),Rosemary L. Gido,2001,4.201265832670408)
+(The Truly Disadvantaged: The Inner City, the Underclass, and Public Policy,William Julius Wilson,1990,4.201265832670408)
+(Mill : On Liberty (The Library of Liberal Arts),Currin V. Shields,1956,4.201265832670408)
+(Landscape for a Good Woman: A Story,Carolyn Kay Steedman,1987,4.201265832670408)
+(Looking Backward, 2000-1887 (Bedford Series in History and Culture),Daniel H. Borus,1995,4.201265832670408)
+(Better Than Sex,Hunter S. Thompson,1996,4.201265832670408)
+(Three Lives (Bedford Cultural Editions),Gertrude Stein,1999,4.201265832670408)
+=====
+
+Cluster 7:
+(Graphic Illustration: Tools &amp, Techniques for Beginning Illustrators (Art &amp, Design Series),1.7597347566770905)
+(Managing Planned Change,Paul C. Nutt,1992,1.7597347566770905)
+(Organization 2000: The Essential Guide for Companies and Teams in the New Economy,Leslie Bendaly,1996,1.7597347566770905)
+(Yoga for Cats,Erica Rutherford,1984,1.7597347566770905)
+(Moments Of Childhood: The Vintage Poster Book,Edelen Wille,2002,1.7597347566770905)
+(Christmas Fantasy Stamps: 49 Full-Color Pressure-Sensitive Stickers,Maggie Kate,1995,1.7597347566770905)
+(The writing process: A concise rhetoric,John M Lannon,1983,1.7597347566770905)
+(In September, the Light Changes,Andrew Holleran,2000,1.7597347566770905)
+(Barbarians to Bureaucrats: Corporate Life Cycle Strategies/Lessons from the Rise and Fall of Civilizations,Lawrence M. Miller,1989,1.7597347566770905)
+(Beyond the Bottom Line: Management in Government,Timothy W Plumptre,1988,1.7597347566770905)
+(Innumeracy: Mathematical Illiteracy and Its Consequences,John Allen Paulos,1988,1.7597347566770905)
+(Sumptuous Sauces in the Microwave,Patricia Tennison,1989,1.7597347566770905)
+(Paradigm Shift: The New Promise of Information Technology,Don Tapscott,1992,1.7597347566770905)
+(The Myth of Irrationality: The Science of the Mind from Plato to Star Trek,John McCrone,1994,1.7597347566770905)
+(Caravaggio : Colour Library (Colour Library),Timothy Wilson-Smith,1998,1.7597347566770905)
+(The New Individualists: The Generation After the Organization Man,Paul Leinberger,1991,1.7597347566770905)
+(The Doll's Dressmaker: The Complete Pattern Book,Venus A. Dodge,1991,1.7597347566770905)
+(The Bed and Border Planner,John Walker,1999,1.7597347566770905)
+(Practical Intelligence: Working Smarter in Business and Everyday Life,Roger Peters,1987,1.7597347566770905)
+(Management Plus: Maximizing Productivity Through Motivation, Performance, and Commitment,Robert A. Fazzi,1994,1.7597347566770905)
+=====
+
+Cluster 8:
+(Malachi's Moon (Daw Book Collectors),Billie Sue Mosiman,2002,0.1675700697158018)
+(The Carbon Murder : A Periodic Table Mystery (Gloria Lamerino Mysteries (Hardcover)),Camille Minichino,2004,0.16984253395415796)
+(A Picture of Guilt,Libby Fischer Hellmann,2003,0.1817649613151762)
+(Someone to Watch over Me: A Grace &amp, Favor Mystery (Churchill, Jill, Grace and Favor Series,),Jill Churchill,0.1817649613151762)
+(Dead North: An Alaska Mystery (Alaska Mysteries (Hardcover)),Sue Henry,2001,0.18235565032639356)
+(Perfect Sax : A Madeline Bean Novel,Jerrilyn Farmer,2004,0.18327768286958426)
+(Operation: Second Chance (Harlequin Superromance, 1185),Roxanne Rustand,2004,0.1833486758372257)
+(The Colonel,Patrick A. Davis,2001,0.18394312659806508)
+(Mortal Engines (The Hungry City Chronicles),Philip Reeve,2003,0.18534588077585587)
+(The Commander,Patrick A. Davis,2002,0.18686317148610063)
+(Holder of Lightning (The Cloudmages, Book 1),S. L. Farrell,2003,0.18688025266593605)
+(Dark as Day (Cold As Ice),Charles Sheffield,2002,0.18688025266593605)
+(There Are Doors,Gene Wolfe,2001,0.18688025266593605)
+(Red Hook,Gabriel Cohen,2001,0.18688025266593605)
+(When Dragons Rage (The Dragoncrown War Cycle, Book 2),Michael A. Stackpole,2002,0.18688025266593605)
+(The Mosquito War,V. A. MacAlister,2001,0.18688025266593605)
+(Malice Downstream,GRAHAM THOMAS,2002,0.18688025266593605)
+(Enchanting Pleasures,Eloisa James,2001,0.18688025266593605)
+(Spaceland : A Novel of the Fourth Dimension,Rudy Rucker,2002,0.1872843873085334)
+(The Dragon's Horn,Glynnis Kincaid,2001,0.18731659966669573)
+=====
+
+Cluster 9:
+(American Foreign Policy: Past, Present, Future (5th Edition),Glenn P. Hastedt,2002,1.3775561429315726)
+(Last Come the Childr: Triump-Cn16dp,David Hagberg,1982,2.16543981313478)
+(Behind the Crystal Ball: Magic, Science, and the Occult from Antiquity Through the New Age,Anthony Aveni,1996,2.4530463174417485)
+(Frühstücke: Essensgeschichten,Karin Ivancsics,1989,2.4764470795884685)
+(Soloalbum. Das Buch zum Film.,Benjamin von Stuckrad-Barre,2003,2.550058327557627)
+(Gps Made Easy: Using Global Positioning Systems in the Outdoors,Lawrence Letham,1995,2.5510252668561693)
+(Garrison Keillor: A Voice of America (Studies in Popular Culture (Jackson, Miss.).),Judith Yaross Lee,1991,2.5510252668561693)
+(King Windom,John Farris,1990,2.926471227486036)
+(Spellbound,Helen Glisic,1998,3.045384594139242)
+(Neighborhood Meltdown,Terry Collins,1998,3.049250274258675)
+(The Last Boy,Robert Lieberman,2002,3.0777223527629913)
+(Spree,J. N. Williamson,1998,3.0853144029458575)
+(School Around Us: 25 years,Claudia Berman,1994,3.12193824500501)
+(The Haunted Car (Goosebumps Series 2000, No 21),R. L. Stine,1999,3.2596670389681255)
+(G�?¤nsehaut 40. Panikpark. ( Ab 10 J.).,R. L. Stine,2000,3.303420166790073)
+(A Treasury of Design for Artists and Craftsmen (Dover Pictorial Archive Series),Gregory Mirow,1969,3.311823036864819)
+(Magic Time (History &amp, Heritage),W. P. Kinsella,3.3857692934885693)
+(Don't Stress!: How to Keep Life's Problems Little,Nancy E. Krulik,1998,3.415154033110605)
+(Annie: The storybook based on the movie (Movie storybooks),Amy Ehrlich,1982,3.448720828132866)
+(Kiss a Frog, Princess,Bonnie Worth,1992,3.448720828132866)
+=====
