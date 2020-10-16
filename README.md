@@ -1,5 +1,7 @@
 # books_rating_ALS_and_kmeans
 books_rating_using_MLlib_ALS_and_kmeans
+- Source : Kaggle Dataset
+- URL: https://www.kaggle.com/ruchi798/bookcrossing-dataset
 
 # Purpose:
 - use book ratings dataset to train ALS model and extract user and book factors.
